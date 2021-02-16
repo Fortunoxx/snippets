@@ -1,6 +1,6 @@
 <Query Kind="Program" />
 
-
+//https://haacked.com/archive/2012/07/23/get-all-types-in-an-assembly.aspx/
 void Main()
 {
 	foreach(var t in GetTypesWithInterface<test.IHealthCheck>(Assembly.GetExecutingAssembly()))
