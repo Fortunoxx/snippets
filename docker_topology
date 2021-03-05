@@ -1,0 +1,1 @@
+docker run --rm -it --name dcv -v {{PATH_WHERE_DOCKER_COMPOSE_LIVES}}:/input pmsipilot/docker-compose-viz render -m image --force {{DOCKER_COMPOSE_FILENAME}} --output-file=topology.png --no-volumes
