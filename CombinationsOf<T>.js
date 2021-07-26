@@ -1,7 +1,7 @@
 // define a class
 class MyObject {
-	constructor(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10) {
-  	this.Prop01 = p1;
+    constructor(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10) {
+    this.Prop01 = p1;
     this.Prop02 = p2;
     this.Prop03 = p3;
     this.Prop04 = p4;
