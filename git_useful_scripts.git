@@ -1,0 +1,5 @@
+# delete finished branches
+git branch -d $(git branch --merged=master | grep -v master | grep -v develop)
+
+# git housekeeping
+git gc --aggressive --prune --force
