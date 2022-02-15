@@ -11,13 +11,13 @@ declare @factor decimal(2,1) = 1.5 -- this is important
 , @dry_run bit = 0
 , @sql nvarchar(max)
 , @db sysname
-, @test_table sysname
+, @test_table sysname -- = 'd3%'
 
 create table #statements (id int identity primary key not null, db sysname, schema_name sysname, table_name sysname, obj_typ sysname, cmd varchar(max), start_dat datetime null, end_dat datetime null)
 
 begin try
 declare cur cursor for
-	select name from sys.databases where name in ('xxxxxx') 
+	select name from sys.databases where name in ('user_orga') 
 	-- select name from sys.databases where name in ('ickv_21c_bmt', '21c_ickv_iskv_bmt_temp', '21c_ickv_iskv_bmt', 'ickv_21c', 'digigs_sbk', 'user_orga')
 	--> 'lei_ext', 'import_temp', 'DatacenterService' --> diese nicht
 	group by name
@@ -44,6 +44,7 @@ open cur
 	declare @_tab_indexes_and_primary_keys table (definition nvarchar(max))
 	declare @_tab_triggers table(definition nvarchar(max))
 	declare @_rename_indexes table(cmd nvarchar(max))
+	declare @_tab_foreign_keys table(drop_cmd nvarchar(max), create_cmd nvarchar(max))
 
 	declare c1 cursor for 
 		select s.name, t.name, iif(min(c.max_length)=-1,1,0) as has_max, COUNT(*) over () as cnt, ROW_NUMBER() over (order by s.name, t.name) as rn
@@ -52,7 +53,7 @@ open cur
 		join '+QUOTENAME(@db)+N'.sys.columns c on c.object_id = t.object_id
 		where t.is_ms_shipped = 0
 		and c.system_type_id in (167,175) --varchar,char
-		and ('+ISNULL('''' + @test_table + '''','null')+N' = t.name or '+ISNULL('''' + @test_table + '''','null')+N' is null)
+		and (t.name like '+ISNULL('''' + @test_table + '''','null')+N' or '+ISNULL('''' + @test_table + '''','null')+N' is null)
 		group by s.name, t.name
 		order by s.name, t.name
 	open c1
@@ -77,6 +78,7 @@ open cur
 			delete from @_tab_triggers
 			delete from @_rename_indexes
 			delete from @_rename_default_constraints
+			delete from @_tab_foreign_keys
 				'
 
 		-- 1a: drop default constraints
@@ -228,15 +230,48 @@ open cur
 
 		-- 7: add triggers
 		set @sql += N'
-				insert into @_tab_triggers (definition) 
-				select m.definition
-				from '+QUOTENAME(@db)+N'.sys.triggers tr
-				join '+QUOTENAME(@db)+N'.sys.tables t on t.object_id = tr.parent_id and t.name = @_tname
-				join '+QUOTENAME(@db)+N'.sys.schemas s on s.schema_id = t.schema_id and s.name = @_sname
-				join '+QUOTENAME(@db)+N'.sys.sql_modules m on m.object_id = tr.object_id
+			insert into @_tab_triggers (definition) 
+			select m.definition
+			from '+QUOTENAME(@db)+N'.sys.triggers tr
+			join '+QUOTENAME(@db)+N'.sys.tables t on t.object_id = tr.parent_id and t.name = @_tname
+			join '+QUOTENAME(@db)+N'.sys.schemas s on s.schema_id = t.schema_id and s.name = @_sname
+			join '+QUOTENAME(@db)+N'.sys.sql_modules m on m.object_id = tr.object_id
 			'
 
-		-- 8: insert all that stuff into temp-table
+		-- 8: recreate foreign keys
+		set @sql += N'
+			insert into @_tab_foreign_keys (drop_cmd, create_cmd)
+			select ''ALTER TABLE '+QUOTENAME(@db)+N'.'' + quotename(@_sname) + ''.'' + quotename(@_tname) + '' DROP CONSTRAINT ''+quotename(fk.name)
+				, ''ALTER TABLE '+QUOTENAME(@db)+N'.'' + quotename(@_sname) + ''.'' + quotename(tp.name) + '' WITH CHECK ADD CONSTRAINT ''+quotename(fk.name)+'' FOREIGN KEY(''+ParentColumns+'') REFERENCES '' + quotename(sr.name) + ''.'' + quotename(tr.name) + '' (''+ReferencedColumns+'')'' from (
+				SELECT fk.object_id
+				, STUFF((
+					SELECT '', '' + quotename(c.name)
+					FROM '+QUOTENAME(@db)+N'.sys.foreign_key_columns fkc
+					JOIN '+QUOTENAME(@db)+N'.sys.columns c on c.object_id = fkc.parent_object_id and c.column_id = fkc.parent_column_id
+					WHERE fkc.parent_object_id = fk.parent_object_id and fkc.constraint_object_id = fk.object_id
+					GROUP BY fkc.parent_object_id, C.name, fkc.constraint_object_id
+					FOR XML PATH('''')
+				), 1, 2, '''') ParentColumns
+				, STUFF((
+					SELECT '', '' + quotename(c.name)
+					FROM '+QUOTENAME(@db)+N'.sys.foreign_key_columns fkc
+					JOIN '+QUOTENAME(@db)+N'.sys.columns c on c.object_id = fkc.referenced_object_id and c.column_id = fkc.referenced_column_id
+					WHERE fkc.referenced_object_id = fk.referenced_object_id and fkc.constraint_object_id = fk.object_id
+					GROUP BY fkc.referenced_object_id, C.name, fkc.constraint_object_id
+					FOR XML PATH('''')
+				), 1, 2, '''') ReferencedColumns
+				FROM sys.foreign_keys fk
+			) all_foreign_keys
+			join '+QUOTENAME(@db)+N'.sys.foreign_keys fk on fk.object_id = all_foreign_keys.object_id
+			join '+QUOTENAME(@db)+N'.sys.tables tp on tp.object_id = fk.parent_object_id
+			join '+QUOTENAME(@db)+N'.sys.schemas sp on sp.schema_id = tp.schema_id
+			join '+QUOTENAME(@db)+N'.sys.tables tr on tr.object_id = fk.referenced_object_id
+			join '+QUOTENAME(@db)+N'.sys.schemas sr on sr.schema_id = tr.schema_id
+			where tp.name = @_tname
+			and sp.name = @_sname
+			'
+
+		-- 9: insert all that stuff into temp-table
 		set @sql += N'
 			print char(13) + char(10) + ''-- ['' + convert(sysname, @_idx) + '' / '' + convert(sysname, @_cnt) + ''] '' + quotename(@_sname) + ''.'' + quotename(@_tname)
 
@@ -259,6 +294,10 @@ open cur
 				select '''+QUOTENAME(@db)+N''', @_sname, @_tname, ''TRG'', definition from @_tab_triggers
 			insert into #statements (db, schema_name, table_name, obj_typ, cmd) 
 				select '''+QUOTENAME(@db)+N''', @_sname, @_tname, ''IPK'', definition from @_tab_indexes_and_primary_keys
+			insert into #statements (db, schema_name, table_name, obj_typ, cmd) 
+				select '''+QUOTENAME(@db)+N''', @_sname, @_tname, ''DFK'', drop_cmd from @_tab_foreign_keys
+			insert into #statements (db, schema_name, table_name, obj_typ, cmd) 
+				select '''+QUOTENAME(@db)+N''', @_sname, @_tname, ''CFK'', create_cmd from @_tab_foreign_keys
 
 			fetch next from c1 into @_sname, @_tname, @_has_max, @_cnt, @_idx
 		end
@@ -280,21 +319,23 @@ open cur
 close cur
 deallocate cur
 
-declare @prio table (obj_typ sysname, prio tinyint, description sysname)
-insert into @prio (obj_typ, prio, description) values
-  --('DDC', 09, 'DropDefault Constraint') -- disabled: we rename
-  ('RDC', 10, 'Rename Default Constraint')
-, ('RIx', 11, 'Rename Index')
-, ('CTa', 20, 'Create Table')
-, ('SLE', 21, 'Set Lock Escalation')
-, ('ADC', 22, 'Add Default Constraints')
-, ('ITT', 30, 'Insert into Temp Table')
-, ('IPK', 31, 'Indexes and Primary Keys')
---, ('DTa', 40, 'Drop Table')
-, ('RDT', 41, 'Rename instead of Drop Table')
-, ('RTa', 50, 'Rename Table')
-
-select * from #statements s join @prio p on p.obj_typ = s.obj_typ order by s.table_name, p.prio, s.id
+declare @prio table (category tinyint, prio tinyint, obj_typ sysname, description sysname)
+insert into @prio (category, prio, obj_typ, description) values
+--(0, 09, 'DDC', 'DropDefault Constraint') -- disabled: we rename
+  (0, 10, 'RDC', 'Rename Default Constraint')
+, (0, 11, 'RIx', 'Rename Index')
+, (0, 20, 'CTa', 'Create Table')
+, (0, 21, 'SLE', 'Set Lock Escalation')
+, (0, 22, 'ADC', 'Add Default Constraints')
+, (0, 30, 'ITT', 'Insert into Temp Table')
+, (0, 31, 'IPK', 'Indexes and Primary Keys')
+--(0, 40, 'DTa', 'Drop Table') -- disabled: we rename
+, (0, 40, 'DFK', 'Drop Foreign Keys') -- when table is dropped, fks are dropped too
+, (0, 41, 'RDT', 'Rename instead of Drop Table')
+, (0, 50, 'RTa', 'Rename Table')
+, (1, 10, 'CFK', 'Create Foreign Keys')
+    
+select * from #statements s join @prio p on p.obj_typ = s.obj_typ order by p.category, s.table_name, p.prio, s.id
 
 -- do it!
 declare @id int, @type sysname
@@ -303,7 +344,7 @@ declare cur cursor for
 	join @prio p on p.obj_typ = s.obj_typ 
 	where 1=1
 	and table_name like @test_table or @test_table is null 
-	order by s.table_name, p.prio, s.id
+	order by p.category, s.table_name, p.prio, s.id
 open cur
 	fetch next from cur into @db, @sql, @id, @type
 	while @@FETCH_STATUS = 0 begin
@@ -322,7 +363,8 @@ open cur
 close cur 
 deallocate cur
 
-select * from #statements s join @prio p on p.obj_typ = s.obj_typ order by s.table_name, p.prio, s.id
+select * from #statements s join @prio p on p.obj_typ = s.obj_typ order by p.category, s.table_name, p.prio, s.id
+
 
 end try
 begin catch
